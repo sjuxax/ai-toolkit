@@ -1,16 +1,18 @@
-'''
+"""
 
 ostris/ai-toolkit on https://modal.com
 Run training with the following command:
 modal run run_modal.py --config-file-list-str=/root/ai-toolkit/config/whatever_you_want.yml
 
-'''
+"""
 
 import os
+
 os.environ["HF_HUB_ENABLE_HF_TRANSFER"] = "1"
 import sys
 import modal
 from dotenv import load_dotenv
+
 # Load the .env file if it exists
 load_dotenv()
 
@@ -19,7 +21,7 @@ sys.path.insert(0, "/root/ai-toolkit")
 # import toolkit.cuda_malloc
 
 # turn off diffusers telemetry until I can figure out how to make it opt-in
-os.environ['DISABLE_TELEMETRY'] = 'YES'
+os.environ["DISABLE_TELEMETRY"] = "YES"
 
 # define the volume for storing model outputs, using "creating volumes lazily": https://modal.com/docs/guide/volumes
 # you will find your model, samples and optimizer stored in: https://modal.com/storage/your-username/main/flux-lora-models
@@ -32,64 +34,96 @@ MOUNT_DIR = "/root/ai-toolkit/modal_output"  # modal_output, due to "cannot moun
 image = (
     modal.Image.debian_slim(python_version="3.11")
     # install required system and pip packages, more about this modal approach: https://modal.com/docs/examples/dreambooth_app
-    .apt_install("libgl1", "libglib2.0-0")
-    .pip_install(
-        "python-dotenv",
-        "torch", 
-        "diffusers[torch]", 
-        "transformers", 
-        "ftfy", 
-        "torchvision", 
-        "oyaml", 
-        "opencv-python", 
-        "albumentations",
+    .apt_install("libgl1", "libglib2.0-0", "git")
+    .uv_pip_install(
+        "scipy==1.12.0",
+        "torchao==0.10.0",
         "safetensors",
+        "git+https://github.com/huggingface/diffusers.git",
+        "transformers==5.5.3",
         "lycoris-lora==1.8.3",
         "flatten_json",
         "pyyaml",
-        "tensorboard", 
-        "kornia", 
-        "invisible-watermark", 
-        "einops", 
-        "accelerate", 
-        "toml", 
+        "oyaml",
+        "tensorboard",
+        "kornia",
+        "invisible-watermark",
+        "einops",
+        "accelerate",
+        "toml",
+        "albumentations==1.4.15",
+        "albucore==0.0.16",
         "pydantic",
         "omegaconf",
         "k-diffusion",
         "open_clip_torch",
-        "timm",
+        "timm==1.0.22",
         "prodigyopt",
-        "controlnet_aux==0.0.7",
+        "controlnet_aux==0.0.10",
+        "python-dotenv",
         "bitsandbytes",
         "hf_transfer",
-        "lpips", 
-        "pytorch_fid", 
-        "optimum-quanto", 
-        "sentencepiece", 
-        "huggingface_hub", 
-        "peft"
+        "lpips",
+        "pytorch_fid",
+        "optimum-quanto==0.2.4",
+        "sentencepiece",
+        "huggingface_hub==1.10.1",
+        "peft==0.18.1",
+        "gradio",
+        "python-slugify",
+        "opencv-python",
+        "pytorch-wavelets==1.3.0",
+        "matplotlib==3.10.1",
+        "setuptools==69.5.1",
+        "av==16.0.1",
+        "torchcodec==0.9.1",
+        "librosa==0.11.0",
+        "mutagen==1.47.0",
+        "torchaudio"
+    )
+    # add the entire ai-toolkit directory to the image (modal.Mount was removed in Modal 1.0,
+    # local files are now attached to the image instead: https://modal.com/docs/guide/modal-1-0-migration)
+    # non-copy add_local_dir must be the last step of the image build
+    .add_local_dir(
+        os.path.dirname(os.path.abspath(__file__)),
+        remote_path="/root/ai-toolkit",
+        ignore=[
+            ".git",
+            "**/__pycache__",
+            "venv",
+            ".venv",
+            "output",
+            "modal_output",
+            "ui/node_modules",
+        ],
     )
 )
 
-# mount for the entire ai-toolkit directory
-# example: "/Users/username/ai-toolkit" is the local directory, "/root/ai-toolkit" is the remote directory
-code_mount = modal.Mount.from_local_dir("/Users/username/ai-toolkit", remote_path="/root/ai-toolkit")
-
-# create the Modal app with the necessary mounts and volumes
-app = modal.App(name="flux-lora-training", image=image, mounts=[code_mount], volumes={MOUNT_DIR: model_volume})
+# create the Modal app with the necessary volumes
+app = modal.App(
+    name="flux-lora-training", image=image, volumes={MOUNT_DIR: model_volume}
+)
 
 # Check if we have DEBUG_TOOLKIT in env
 if os.environ.get("DEBUG_TOOLKIT", "0") == "1":
     # Set torch to trace mode
     import torch
+
     torch.autograd.set_detect_anomaly(True)
 
 import argparse
 from toolkit.job import get_job
 
+
 def print_end_message(jobs_completed, jobs_failed):
-    failure_string = f"{jobs_failed} failure{'' if jobs_failed == 1 else 's'}" if jobs_failed > 0 else ""
-    completed_string = f"{jobs_completed} completed job{'' if jobs_completed == 1 else 's'}"
+    failure_string = (
+        f"{jobs_failed} failure{'' if jobs_failed == 1 else 's'}"
+        if jobs_failed > 0
+        else ""
+    )
+    completed_string = (
+        f"{jobs_completed} completed job{'' if jobs_completed == 1 else 's'}"
+    )
 
     print("")
     print("========================================")
@@ -104,9 +138,9 @@ def print_end_message(jobs_completed, jobs_failed):
 @app.function(
     # request a GPU with at least 24GB VRAM
     # more about modal GPU's: https://modal.com/docs/guide/gpu
-    gpu="A100", # gpu="H100"
+    gpu="A100",  # gpu="H100"
     # more about modal timeouts: https://modal.com/docs/guide/timeouts
-    timeout=7200  # 2 hours, increase or decrease if needed
+    timeout=7200,  # 2 hours, increase or decrease if needed
 )
 def main(config_file_list_str: str, recover: bool = False, name: str = None):
     # convert the config file list from a string to a list
@@ -115,22 +149,24 @@ def main(config_file_list_str: str, recover: bool = False, name: str = None):
     jobs_completed = 0
     jobs_failed = 0
 
-    print(f"Running {len(config_file_list)} job{'' if len(config_file_list) == 1 else 's'}")
+    print(
+        f"Running {len(config_file_list)} job{'' if len(config_file_list) == 1 else 's'}"
+    )
 
     for config_file in config_file_list:
         try:
             job = get_job(config_file, name)
-            
-            job.config['process'][0]['training_folder'] = MOUNT_DIR
+
+            job.config["process"][0]["training_folder"] = MOUNT_DIR
             os.makedirs(MOUNT_DIR, exist_ok=True)
             print(f"Training outputs will be saved to: {MOUNT_DIR}")
-            
+
             # run the job
             job.run()
-            
+
             # commit the volume after training
             model_volume.commit()
-            
+
             job.cleanup()
             jobs_completed += 1
         except Exception as e:
@@ -142,34 +178,44 @@ def main(config_file_list_str: str, recover: bool = False, name: str = None):
 
     print_end_message(jobs_completed, jobs_failed)
 
+
 if __name__ == "__main__":
     parser = argparse.ArgumentParser()
 
     # require at least one config file
     parser.add_argument(
-        'config_file_list',
-        nargs='+',
+        "config_file_list",
+        nargs="+",
         type=str,
-        help='Name of config file (eg: person_v1 for config/person_v1.json/yaml), or full path if it is not in config folder, you can pass multiple config files and run them all sequentially'
+        help="Name of config file (eg: person_v1 for config/person_v1.json/yaml), or full path if it is not in config folder, you can pass multiple config files and run them all sequentially",
     )
 
     # flag to continue if a job fails
     parser.add_argument(
-        '-r', '--recover',
-        action='store_true',
-        help='Continue running additional jobs even if a job fails'
+        "-r",
+        "--recover",
+        action="store_true",
+        help="Continue running additional jobs even if a job fails",
     )
 
     # optional name replacement for config file
     parser.add_argument(
-        '-n', '--name',
+        "-n",
+        "--name",
         type=str,
         default=None,
-        help='Name to replace [name] tag in config file, useful for shared config file'
+        help="Name to replace [name] tag in config file, useful for shared config file",
     )
     args = parser.parse_args()
 
     # convert list of config files to a comma-separated string for Modal compatibility
     config_file_list_str = ",".join(args.config_file_list)
 
-    main.call(config_file_list_str=config_file_list_str, recover=args.recover, name=args.name)
+    # Function.call() was removed in Modal 1.0; invoking from a plain script now
+    # requires running the app ourselves and calling .remote()
+    with modal.enable_output(), app.run():
+        main.remote(
+            config_file_list_str=config_file_list_str,
+            recover=args.recover,
+            name=args.name,
+        )

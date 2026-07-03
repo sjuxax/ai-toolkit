@@ -80,7 +80,9 @@ def get_config(
     config_path = os.path.join(TOOLKIT_ROOT, 'config', config_file_path)
     # see if it is in the config folder with any of the possible extensions if it doesnt have one
     real_config_path = None
-    if not os.path.exists(config_path):
+    if os.path.exists(config_path):
+        real_config_path = config_path
+    else:
         for ext in possible_extensions:
             if os.path.exists(config_path + ext):
                 real_config_path = config_path + ext
