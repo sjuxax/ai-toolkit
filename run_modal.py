@@ -142,7 +142,7 @@ def print_end_message(jobs_completed, jobs_failed):
     # more about modal timeouts: https://modal.com/docs/guide/timeouts
     timeout=7200,  # 2 hours, increase or decrease if needed
 )
-def main(config_file_list_str: str, recover: bool = False, name: str = None):
+def main(config_file_list_str: str, local_root: str, recover: bool = False, name: str = None):
     # convert the config file list from a string to a list
     config_file_list = config_file_list_str.split(",")
 
@@ -160,6 +160,15 @@ def main(config_file_list_str: str, recover: bool = False, name: str = None):
             job.config["process"][0]["training_folder"] = MOUNT_DIR
             os.makedirs(MOUNT_DIR, exist_ok=True)
             print(f"Training outputs will be saved to: {MOUNT_DIR}")
+
+            # dataset folder_paths are often given as absolute paths on the local
+            # machine (they're not resolved against any root by DatasetConfig), but
+            # the repo - including any datasets living under it - is mounted at
+            # /root/ai-toolkit remotely, so rewrite the local prefix to match
+            for dataset in job.config["process"][0].get("datasets", []):
+                folder_path = dataset.get("folder_path")
+                if folder_path and folder_path.startswith(local_root):
+                    dataset["folder_path"] = folder_path.replace(local_root, "/root/ai-toolkit", 1)
 
             # run the job
             job.run()
@@ -216,6 +225,7 @@ if __name__ == "__main__":
     with modal.enable_output(), app.run():
         main.remote(
             config_file_list_str=config_file_list_str,
+            local_root=os.path.dirname(os.path.abspath(__file__)),
             recover=args.recover,
             name=args.name,
         )
