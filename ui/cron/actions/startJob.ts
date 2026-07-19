@@ -7,6 +7,17 @@ import { TOOLKIT_ROOT, getTrainingFolder, getHFToken } from '../paths';
 import { resolvePythonPath } from '../pythonPath';
 const isWindows = process.platform === 'win32';
 
+const markJobFailed = async (jobID: string, info: string) => {
+  try {
+    await prisma.job.update({
+      where: { id: jobID },
+      data: { status: 'error', info },
+    });
+  } catch (e) {
+    console.error(`Error marking job ${jobID} as failed:`, e);
+  }
+};
+
 const startAndWatchJob = (job: Job) => {
   // starts and watches the job asynchronously
   return new Promise<void>(async (resolve, reject) => {
@@ -84,6 +95,18 @@ const startAndWatchJob = (job: Job) => {
     // Add the --log argument to the command
     const args = [runFilePath, configPath, '--log', logPath];
 
+    // Capture stderr in a file so crashes before the trainer takes over
+    // (bad interpreter, import errors, ...) are not lost. A file descriptor
+    // does not tie the child to the parent, so it can still be detached.
+    const stderrPath = path.join(trainingFolder, 'stderr.log');
+    let stderrFd: number | null = null;
+    try {
+      stderrFd = fs.openSync(stderrPath, 'w');
+    } catch (e) {
+      console.error('Error opening stderr log file:', e);
+    }
+    const stdio: any = ['ignore', 'ignore', stderrFd ?? 'ignore'];
+
     try {
       let subprocess;
 
@@ -97,19 +120,53 @@ const startAndWatchJob = (job: Job) => {
           cwd: TOOLKIT_ROOT,
           detached: true,
           windowsHide: true,
-          stdio: 'ignore', // don't tie stdio to parent
+          stdio, // don't tie stdio to parent
         });
       } else {
-        // For non-Windows platforms, fully detach and ignore stdio so it survives daemon-like
+        // For non-Windows platforms, fully detach so it survives daemon-like
         subprocess = spawn(pythonPath, args, {
           detached: true,
-          stdio: 'ignore',
+          stdio,
           env: {
             ...process.env,
             ...additionalEnv,
           },
           cwd: TOOLKIT_ROOT,
         });
+      }
+
+      // spawn() does not throw when the binary is missing; it emits an
+      // async 'error' event instead, so without this the job would sit at
+      // "Starting job..." forever.
+      subprocess.on('error', async (error: any) => {
+        console.error(`Error launching job ${jobID}:`, error);
+        await markJobFailed(jobID, `Error launching job: ${error?.message || 'Unknown error'} (${pythonPath})`);
+      });
+
+      // Best-effort watch for early crashes (e.g. import errors in a broken
+      // python env). A healthy run updates its own status via the sqlite db,
+      // so only flag the job if it died while still marked as running.
+      subprocess.on('exit', async (code: number | null) => {
+        if (code === null || code === 0) {
+          return;
+        }
+        const currentJob = await prisma.job.findUnique({ where: { id: jobID } });
+        if (currentJob?.status !== 'running') {
+          return;
+        }
+        let stderrTail = '';
+        try {
+          const stderr = fs.readFileSync(stderrPath, 'utf-8').trim();
+          stderrTail = stderr.slice(-1000);
+        } catch (e) {
+          // ignore, report the exit code only
+        }
+        await markJobFailed(jobID, `Job exited with code ${code}${stderrTail ? `: ${stderrTail}` : ''}`);
+      });
+
+      // The child has its own copy of the stderr descriptor
+      if (stderrFd != null) {
+        fs.closeSync(stderrFd);
       }
 
       // Save the PID to the database and a file for future management (stop/inspect)
