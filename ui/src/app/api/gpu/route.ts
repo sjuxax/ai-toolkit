@@ -2,7 +2,9 @@ import { NextResponse } from 'next/server';
 import { exec } from 'child_process';
 import { promisify } from 'util';
 import { createRequire } from 'module';
+import fs from 'fs';
 import os from 'os';
+import path from 'path';
 import { cached } from '@/server/apiCache';
 
 const execAsync = promisify(exec);
@@ -151,17 +153,13 @@ async function getGpuInfo() {
     }
   }
 
-  if (await checkAmdSmi(isWindows)) {
-    try {
-      const gpuStats = await getAmdGpuStats();
-      return {
-        hasNvidiaSmi: false,
-        hasAmdSmi: true,
-        gpus: gpuStats,
-      };
-    } catch (error) {
-      console.error('Error fetching AMD GPU stats:', error);
-    }
+  const amdGpus = await getAmdGpuStats();
+  if (amdGpus) {
+    return {
+      hasNvidiaSmi: false,
+      hasAmdSmi: true,
+      gpus: amdGpus,
+    };
   }
 
   return {
@@ -208,13 +206,54 @@ async function checkNvidiaSmi(isWindows: boolean): Promise<boolean> {
   }
 }
 
-async function checkAmdSmi(isWindows: boolean): Promise<boolean> {
+// The amd-smi binary that most recently delivered stats successfully
+let workingAmdSmi: string | undefined;
+
+// ROCm installs often aren't in PATH, and a broken distro amd-smi package
+// can shadow a working /opt/rocm install, so include versioned locations.
+function amdSmiCandidates(): string[] {
+  const candidates = ['amd-smi'];
   try {
-    await execAsync(isWindows ? 'where amd-smi' : 'which amd-smi');
-    return true;
-  } catch (error) {
-    return false;
+    const rocmDirs = fs
+      .readdirSync('/opt')
+      .filter(dir => dir.startsWith('rocm'))
+      .sort()
+      .reverse(); // prefer the newest versioned install
+    for (const dir of rocmDirs) {
+      const candidate = path.join('/opt', dir, 'bin', 'amd-smi');
+      if (fs.existsSync(candidate)) {
+        candidates.push(candidate);
+      }
+    }
+  } catch {
+    // no /opt (e.g. Windows); PATH candidate only
   }
+  return candidates;
+}
+
+// Probe candidates with the real queries we need — a broken install can pass
+// a trivial `version` check and still crash on the metric query. Returns null
+// when no candidate delivers stats.
+async function getAmdGpuStats() {
+  const memoized = workingAmdSmi;
+  const candidates = memoized ? [memoized] : amdSmiCandidates();
+
+  for (const candidate of candidates) {
+    try {
+      const gpus = await fetchAmdGpuStats(candidate);
+      workingAmdSmi = candidate;
+      return gpus;
+    } catch (error) {
+      // Expected while probing on machines without a (working) amd-smi, but
+      // a previously working binary failing is worth surfacing.
+      if (memoized) {
+        console.error(`amd-smi at ${candidate} stopped working:`, error);
+      }
+    }
+  }
+
+  workingAmdSmi = undefined; // re-probe all candidates on the next request
+  return null;
 }
 
 async function getGpuStats(isWindows: boolean) {
@@ -294,12 +333,12 @@ function parseAmdSmiJson(stdout: string): any[] {
   return Array.isArray(parsed) ? parsed : (parsed.gpu_data ?? []);
 }
 
-async function getAmdGpuStats() {
+async function fetchAmdGpuStats(amdSmi: string) {
   // Query only the sections we need: a bare `amd-smi metric` can crash on
   // some cards when it tries to read the voltage-curve tables.
   const [{ stdout: staticOut }, { stdout: metricOut }] = await Promise.all([
-    execAsync('amd-smi static --asic --limit --driver --json'),
-    execAsync('amd-smi metric --usage --power --temperature --mem-usage --fan --clock --json'),
+    execAsync(`"${amdSmi}" static --asic --limit --driver --json`),
+    execAsync(`"${amdSmi}" metric --usage --power --temperature --mem-usage --fan --clock --json`),
   ]);
 
   const staticByGpu = new Map(parseAmdSmiJson(staticOut).map(gpu => [gpu.gpu, gpu]));
